@@ -1,19 +1,21 @@
 const fs = require("fs");
 const ejs = require("ejs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const mongo = require("mongodb");
 const app = express();
 const MongoDBStore = require("connect-mongodb-session")(session);
 
-const mongoURL = "mongodb://127.0.0.1:27017/";
+const mongoURL = process.env.MONGO_URL || "mongodb://127.0.0.1:27017/";
 const PORT = process.env.PORT || 8080;
 
 let db;
 let MongoClient = mongo.MongoClient;
 let mongoStore = new MongoDBStore({
   uri: mongoURL,
+  databaseName: "a4",
   collection: "sessiondata",
 });
 
@@ -26,10 +28,15 @@ fs.readdirSync("restaurants").forEach((file) => {
   restaurants.push(resto);
 });
 
+app.set("trust proxy", true);
 app.set("view-engine", "ejs");
+
+app.get("/healthz", (req, res) => res.status(200).send("ok"));
+
 app.use(express.static(path.join(__dirname, "views")));
 app.use(express.json());
-app.use(session({ secret: "a4", resave: true, saveUninitialized: true, store: mongoStore }));
+app.use((req, res, next) => (db ? next() : res.status(503).send()));
+app.use(session({ secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"), resave: true, saveUninitialized: true, store: mongoStore, cookie: { secure: "auto", sameSite: "lax" } }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("*", auth); // For all get requests, check authentication status
@@ -62,6 +69,8 @@ app.get("/login", (req, res) => {
 });
 
 app.post("/login", (req, res) => {
+  if (typeof req.body.username !== "string" || typeof req.body.password !== "string") return res.status(400).send("Invalid credentials.");
+
   // Find a corresponding user with the given credentials
   db.collection("users").findOne({ username: req.body.username, password: req.body.password }, function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurs, send a error message back to the client
@@ -88,6 +97,8 @@ app.get("/register", (req, res) => {
 });
 
 app.post("/register", (req, res) => {
+  if (typeof req.body.username !== "string" || typeof req.body.password !== "string") return res.status(400).send("Invalid credentials.");
+
   // Check if a user already exists with the given username
   db.collection("users").findOne({ username: req.body.username }, function (err, result) {
     if (result) return res.status(400).send("Username already taken, please try again.");
@@ -120,7 +131,7 @@ app.get("/restaurants", (req, res) => {
 });
 
 app.get("/users", (req, res) => {
-  let query = req.query.name || ""; // Check given query, if null, set to empty string
+  let query = String(req.query.name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // Check given query, if null, set to empty string, and match it literally
 
   // Find all the matching users
   db.collection("users")
@@ -236,12 +247,11 @@ function auth(req, res, next) {
   });
 }
 
-// Connect to the database and start the server when ready
+app.listen(PORT, () => console.log("Server running at http://localhost:" + PORT));
+
+// Connect to the database, exit if it is unreachable
 MongoClient.connect(mongoURL, function (err, client) {
   if (err) throw err;
 
   db = client.db("a4");
-
-  console.log("Server running at http://localhost:" + PORT);
-  app.listen(PORT);
 });
