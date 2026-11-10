@@ -5,11 +5,13 @@ const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const mongo = require("mongodb");
+const bcrypt = require("bcrypt");
 const app = express();
 const MongoDBStore = require("connect-mongodb-session")(session);
 
 const mongoURL = process.env.MONGO_URL || "mongodb://127.0.0.1:27017/";
 const PORT = process.env.PORT || 8080;
+const BCRYPT_HASH = /^\$2[aby]\$/;
 
 let db;
 let MongoClient = mongo.MongoClient;
@@ -18,6 +20,13 @@ let mongoStore = new MongoDBStore({
   databaseName: "a4",
   collection: "sessiondata",
 });
+
+// The store has no touch(), which resave: false relies on to keep a used session from expiring
+mongoStore.touch = function (id, session, callback) {
+  const expires = session.cookie && session.cookie.expires ? new Date(session.cookie.expires) : new Date(Date.now() + this.options.expires);
+  if (!this.db) return callback();
+  this.db.collection(this.options.collection).updateOne(this._generateQuery(id), { $set: { [this.options.expiresKey]: expires } }, (error) => callback(error));
+};
 
 let restaurants = []; // The array that contains a list of all the restaurant objects
 
@@ -37,7 +46,7 @@ app.get("/", (req, res) => res.redirect("home/"));
 app.use(express.static(path.join(__dirname, "views")));
 app.use(express.json());
 app.use((req, res, next) => (db ? next() : res.status(503).send()));
-app.use(session({ secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"), resave: true, saveUninitialized: true, store: mongoStore, cookie: { secure: "auto", sameSite: "lax" } }));
+app.use(session({ secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"), resave: false, saveUninitialized: false, store: mongoStore, cookie: { secure: "auto", sameSite: "lax" } }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("*", auth); // For all get requests, check authentication status
@@ -70,16 +79,15 @@ app.get("/login", (req, res) => {
 });
 
 app.post("/login", (req, res) => {
-  if (typeof req.body.username !== "string" || typeof req.body.password !== "string") return res.status(400).send("Invalid credentials.");
+  if (!validCredentialInput(req.body)) return res.status(400).send("Invalid credentials.");
 
-  // Find a corresponding user with the given credentials
-  db.collection("users").findOne({ username: req.body.username, password: req.body.password }, function (err, result) {
+  // Find the user and check the password against its hash
+  db.collection("users").findOne({ username: req.body.username }, async function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurs, send a error message back to the client
 
-    // If found a matching user, save credentials to cookies and send back the user ID
-    if (result) {
-      req.session.username = result.username;
-      req.session.password = result.password;
+    // If the password matches, keep the user ID in the session and send it back
+    if (result && (await passwordMatches(req.body.password, result.password))) {
+      req.session.userId = result._id.toString();
       res.status(200).send(result._id.toString());
     } else {
       // Otherwise, send a error message
@@ -98,27 +106,26 @@ app.get("/register", (req, res) => {
 });
 
 app.post("/register", (req, res) => {
-  if (typeof req.body.username !== "string" || typeof req.body.password !== "string") return res.status(400).send("Invalid credentials.");
+  if (!validCredentialInput(req.body)) return res.status(400).send("Invalid credentials.");
 
   // Check if a user already exists with the given username
-  db.collection("users").findOne({ username: req.body.username }, function (err, result) {
+  db.collection("users").findOne({ username: req.body.username }, async function (err, result) {
     if (result) return res.status(400).send("Username already taken, please try again.");
 
-    // If not, add user to database, save credentials to cookies and send back the user ID
-    db.collection("users").insertOne({ username: req.body.username, password: req.body.password, privacy: false }, function (err, result) {
+    // If not, add user to database with a hashed password, keep the user ID in the session and send it back
+    const password = await bcrypt.hash(req.body.password, 10);
+    db.collection("users").insertOne({ username: req.body.username, password, privacy: false }, function (err, result) {
       if (err) return res.status(400).send("An error occurred. Please try again.");
 
-      req.session.username = result.username;
-      req.session.password = result.password;
+      req.session.userId = result.insertedId.toString();
       res.status(200).send(result.insertedId.toString());
     });
   });
 });
 
 app.get("/logout", (req, res) => {
-  // Set the credential cookies to null and redirect to home page
-  req.session.username = null;
-  req.session.password = null;
+  // Forget the signed-in user and redirect to home page
+  req.session.userId = null;
   res.redirect("../home/");
 });
 
@@ -150,7 +157,7 @@ app.post("/togglePrivacy", auth, (req, res) => {
   if (!req.loggedIn) return res.status(403).send(); // If not logged in, send back error message
 
   // Update the matching user's privacy settings
-  db.collection("users").updateOne({ username: req.session.username, password: req.session.password }, { $set: { privacy: !req.user.privacy } }, function (err, result) {
+  db.collection("users").updateOne({ _id: req.user._id }, { $set: { privacy: !req.user.privacy } }, function (err, result) {
     if (err) return res.status(404).send(); // If an error occurred, send back error message
 
     res.status(200).send(!req.user.privacy); // If successful, send back the new user's privacy value as boolean
@@ -242,23 +249,49 @@ function auth(req, res, next) {
   req.loggedIn = false;
   req.user = null;
 
-  if (req.session.username == undefined || req.session.password == undefined) return next(); // If no cookies, continue to next middleware
+  if (!req.session.userId) return next(); // If not signed in, continue to next middleware
 
-  // If found a user with corresponding username and password, update login values and continue to next middleware
-  db.collection("users").findOne({ username: req.session.username, password: req.session.password }, function (err, result) {
+  // Load the signed-in user; if it no longer exists, clear the session and continue logged out
+  db.collection("users").findOne({ _id: new mongo.ObjectId(req.session.userId) }, function (err, result) {
     if (result) {
       req.loggedIn = true;
       req.user = result;
-      next();
+    } else if (!err) {
+      req.session.userId = null;
     }
+    next();
   });
+}
+
+// Usernames and passwords must be text, and bcrypt only uses the first 72 bytes of a password
+function validCredentialInput(body) {
+  return typeof body.username === "string" && typeof body.password === "string" && Buffer.byteLength(body.password) <= 72;
+}
+
+// Compare a password with a stored bcrypt hash
+function passwordMatches(password, hash) {
+  return typeof hash === "string" && BCRYPT_HASH.test(hash) ? bcrypt.compare(password, hash) : Promise.resolve(false);
+}
+
+// Hash any password still stored in plain text and delete sessions from before, which hold a password.
+// Runs on every start and does nothing once none are left.
+async function migratePasswords(database) {
+  const users = await database.collection("users").find({ password: { $type: "string", $not: BCRYPT_HASH } }, { projection: { password: 1 } }).toArray();
+  for (const user of users) {
+    await database.collection("users").updateOne({ _id: user._id, password: user.password }, { $set: { password: await bcrypt.hash(user.password, 10) } });
+  }
+
+  const sessions = await database.collection("sessiondata").deleteMany({ "session.password": { $exists: true } });
+  if (users.length || sessions.deletedCount) console.log(`Hashed ${users.length} stored passwords, deleted ${sessions.deletedCount} sessions that held one`);
 }
 
 app.listen(PORT, () => console.log("Server running at http://localhost:" + PORT));
 
-// Connect to the database, exit if it is unreachable
-MongoClient.connect(mongoURL, function (err, client) {
+// Connect to the database and hash leftover plain-text passwords before serving requests, exit if it is unreachable
+MongoClient.connect(mongoURL, async function (err, client) {
   if (err) throw err;
 
-  db = client.db("a4");
+  const database = client.db("a4");
+  await migratePasswords(database);
+  db = database;
 });

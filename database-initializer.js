@@ -1,10 +1,11 @@
+let bcrypt = require("bcrypt");
 let userNames = ["winnifred", "lorene", "cyril", "vella", "erich", "pedro", "madaline", "leoma", "merrill", "jacquie"];
 let users = [];
 
 userNames.forEach((name) => {
   let u = {};
   u.username = name;
-  u.password = name;
+  u.password = bcrypt.hashSync(name, 10);
   u.privacy = false;
   users.push(u);
 });
