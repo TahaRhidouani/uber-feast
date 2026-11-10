@@ -157,6 +157,8 @@ app.post("/togglePrivacy", auth, (req, res) => {
 });
 
 app.get("/users/:id", (req, res) => {
+  if (!/^[0-9a-f]{24}$/i.test(req.params.id)) return res.status(404).send("Invalid user.");
+
   // Find a user with the matching ID
   db.collection("users").findOne({ _id: mongo.ObjectId(req.params.id) }, function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurred, send back error message
@@ -189,6 +191,8 @@ app.get("/users/:id", (req, res) => {
 });
 
 app.post("/orders", auth, (req, res) => {
+  if (!req.loggedIn) return res.status(403).send("You are not logged in.");
+
   // Insert a new order in the database with given information
   db.collection("orders").insertOne({ buyer: { id: req.user._id.toString(), username: req.user.username }, restaurantID: req.body.restaurantID, restaurantName: req.body.restaurantName, subtotal: req.body.subtotal, total: req.body.total, deliveryFee: req.body.deliveryFee, tax: req.body.tax, order: req.body.order }, function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurs, send back error message
@@ -198,6 +202,8 @@ app.post("/orders", auth, (req, res) => {
 });
 
 app.get("/orders/:id", (req, res) => {
+  if (!/^[0-9a-f]{24}$/i.test(req.params.id)) return res.status(404).send("Invalid order.");
+
   // Find an order with the matching ID
   db.collection("orders").findOne({ _id: mongo.ObjectId(req.params.id) }, function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurs, send back error message
