@@ -32,6 +32,7 @@ app.set("trust proxy", true);
 app.set("view-engine", "ejs");
 
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
+app.get("/", (req, res) => res.redirect("home/"));
 
 app.use(express.static(path.join(__dirname, "views")));
 app.use(express.json());
