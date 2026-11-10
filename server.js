@@ -85,10 +85,9 @@ app.post("/login", (req, res) => {
   db.collection("users").findOne({ username: req.body.username }, async function (err, result) {
     if (err) return res.status(400).send("An error occurred. Please try again."); // If an error occurs, send a error message back to the client
 
-    // If the password matches, keep the user ID in the session and send it back
+    // If the password matches, start a new session for the user and send back the user ID
     if (result && (await passwordMatches(req.body.password, result.password))) {
-      req.session.userId = result._id.toString();
-      res.status(200).send(result._id.toString());
+      signIn(req, result._id.toString(), (err) => (err ? res.status(400).send("An error occurred. Please try again.") : res.status(200).send(result._id.toString())));
     } else {
       // Otherwise, send a error message
       res.status(400).send("Invalid credentials.");
@@ -112,21 +111,22 @@ app.post("/register", (req, res) => {
   db.collection("users").findOne({ username: req.body.username }, async function (err, result) {
     if (result) return res.status(400).send("Username already taken, please try again.");
 
-    // If not, add user to database with a hashed password, keep the user ID in the session and send it back
+    // If not, add user to database with a hashed password, start a new session for the user and send back the user ID
     const password = await bcrypt.hash(req.body.password, 10);
     db.collection("users").insertOne({ username: req.body.username, password, privacy: false }, function (err, result) {
       if (err) return res.status(400).send("An error occurred. Please try again.");
 
-      req.session.userId = result.insertedId.toString();
-      res.status(200).send(result.insertedId.toString());
+      signIn(req, result.insertedId.toString(), (err) => (err ? res.status(400).send("An error occurred. Please try again.") : res.status(200).send(result.insertedId.toString())));
     });
   });
 });
 
 app.get("/logout", (req, res) => {
-  // Forget the signed-in user and redirect to home page
-  req.session.userId = null;
-  res.redirect("../home/");
+  // End the session, drop its cookie and redirect to home page, so the old session ID no longer works
+  req.session.destroy(() => {
+    res.clearCookie("connect.sid");
+    res.redirect("../home/");
+  });
 });
 
 app.get("/restaurants", (req, res) => {
@@ -260,6 +260,15 @@ function auth(req, res, next) {
       req.session.userId = null;
     }
     next();
+  });
+}
+
+// Give the signed-in user a new session ID (against session fixation) that holds only the user ID
+function signIn(req, userId, callback) {
+  req.session.regenerate((err) => {
+    if (err) return callback(err);
+    req.session.userId = userId;
+    req.session.save(callback);
   });
 }
 
